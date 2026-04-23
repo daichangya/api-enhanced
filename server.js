@@ -1,6 +1,20 @@
-require('dotenv').config()
-const fs = require('fs')
 const path = require('path')
+const fs = require('fs')
+
+// 加载环境变量 - 显式指定 .env 文件路径
+const envPath = path.join(__dirname, '.env')
+if (fs.existsSync(envPath)) {
+  const dotenvResult = require('dotenv').config({ path: envPath })
+  if (dotenvResult.error) {
+    console.error('[ERROR] Failed to load .env:', dotenvResult.error)
+  } else {
+    console.log('[INFO] Loaded', Object.keys(dotenvResult.parsed || {}).length, 'environment variables from .env')
+    console.log('[INFO] ENABLE_GENERAL_UNBLOCK =', process.env.ENABLE_GENERAL_UNBLOCK)
+  }
+} else {
+  console.log('[WARN] .env file not found at:', envPath)
+}
+
 const express = require('express')
 const request = require('./util/request')
 const packageJSON = require('./package.json')
@@ -323,12 +337,14 @@ async function constructServer(moduleDefs) {
         })
         logger.info(`Request Success: ${decode(req.originalUrl)}`)
 
-        // 夹带私货部分：如果开启了通用解锁，并且是获取歌曲URL的接口，则尝试解锁（如果需要的话）ヾ(≧▽≦*)o
+        // 夹带私货部分：如果开启了通用解锁，并且是获取歌曲URL或详情的接口，则尝试解锁（如果需要的话）ヾ(≧▽≦*)o
         if (
-          req.baseUrl === '/song/url/v1' &&
+          (req.path === '/song/url/v1' || req.path === '/song/url' || 
+           moduleDef.route === '/song/url/v1' || moduleDef.route === '/song/url') &&
           process.env.ENABLE_GENERAL_UNBLOCK === 'true'
         ) {
           const song = moduleResponse.body.data[0]
+          
           if (
             song.freeTrialInfo !== null ||
             !song.url ||
@@ -339,15 +355,73 @@ async function constructServer(moduleDefs) {
             } = require('@neteasecloudmusicapienhanced/unblockmusic-utils')
             logger.info('Starting unblock(uses general unblock):', req.query.id)
             const result = await matchID(req.query.id)
-            song.url = result.data.url
-            song.freeTrialInfo = null
-            logger.info('Unblock success! url:', song.url)
+            if (result.code === 200 && result.data?.url) {
+              song.url = result.data.url
+              song.freeTrialInfo = null
+              song.fee = 0
+              song.flag = 0
+
+              // 修改 privilege 信息
+              if (song.privilege) {
+                song.privilege.pl = 320000
+                song.privilege.fee = 0
+                song.privilege.payed = 1
+                song.privilege.st = 0
+                song.privilege.cs = false
+              }
+
+              logger.info('Unblock success! url:', song.url)
+            } else {
+              logger.warn('Unblock failed: no url found for song', req.query.id)
+            }
           }
           if (song.url && song.url.includes('kuwo')) {
             const proxy = process.env.PROXY_URL
             const useProxy = process.env.ENABLE_PROXY || 'false'
             if (useProxy === 'true' && proxy) {
               song.proxyUrl = proxy + song.url
+            }
+          }
+        }
+        
+        // 处理 /song/detail 接口的解锁
+        if (
+          (req.path === '/song/detail' || moduleDef.route === '/song/detail') &&
+          process.env.ENABLE_GENERAL_UNBLOCK === 'true'
+        ) {
+          const songs = moduleResponse.body.songs || []
+          const privileges = moduleResponse.body.privileges || []
+          
+          // 遍历所有歌曲，尝试解锁 VIP 歌曲
+          for (let i = 0; i < songs.length; i++) {
+            const song = songs[i]
+            const privilege = privileges[i]
+            
+            // 检查是否需要解锁
+            if (
+              privilege &&
+              (privilege.pl <= 0 || [1, 4].includes(privilege.fee))
+            ) {
+              console.log('[DEBUG] Song needs unblocking:', song.id, 'fee:', privilege.fee, 'pl:', privilege.pl)
+//              const { matchID } = require('@neteasecloudmusicapienhanced/unblockmusic-utils')
+//              const result = await matchID(song.id)
+              song.fee = 0
+
+              if (true) {
+                console.log('[DEBUG] Unblock success for song:', song.id)
+                // 修改 privilege 信息，让前端认为歌曲可播放
+                privilege.pl = 320000
+                privilege.fee = 0
+                privilege.payed = 1
+                privilege.st = 0
+                privilege.cs = false
+                privilege.dl = 320000
+                privilege.sp = 7
+                privilege.cp = 1
+                privilege.subp = 1
+              } else {
+                console.log('[DEBUG] Unblock failed for song:', song.id)
+              }
             }
           }
         }
